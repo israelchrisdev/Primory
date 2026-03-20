@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/components/CreateEventForm.tsx","./src/components/EventSpace.tsx","./src/components/HostDashboard.tsx","./src/components/LandingHero.tsx","./src/hooks/useAsync.ts","./src/hooks/useMobile.ts","./src/services/eventService.ts","./src/types/models.ts","./src/utils/supabase.ts"],"version":"5.9.3"}

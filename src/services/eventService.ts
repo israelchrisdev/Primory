@@ -1,151 +1,182 @@
-import QRCode from 'qrcode';
-import supabase from '../utils/supabase';
+import { supabase } from '../utils/supabase';
 import type {
   DonationRecord,
   EventMetrics,
   EventRecord,
+  EventType,
   FeedItem,
-  GuestRecord,
   LivestreamRecord,
   MediaRecord,
   MessageRecord,
 } from '../types/models';
 
-const EVENT_BUCKET = 'event-media';
-
-const randomCode = () => Math.random().toString(36).slice(2, 8).toUpperCase();
-
-export interface CreateEventPayload {
+interface CreateEventInput {
   title: string;
-  type: EventRecord['type'];
+  type: EventType;
   date: string;
-  description?: string;
-  coverFile?: File | null;
-  hostId?: string | null;
+  description: string;
+  coverFile: File | null;
 }
 
-export const createEvent = async (payload: CreateEventPayload) => {
+interface CreateEventResult {
+  event: EventRecord;
+  shareLink: string;
+  qrCode: string;
+}
+
+const STORAGE_BUCKET = 'media';
+
+const generateEventCode = (): string => {
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
+};
+
+const getPublicFileUrl = (bucket: string, path: string): string => {
+  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+  return data.publicUrl;
+};
+
+export const createEvent = async ({
+  title,
+  type,
+  date,
+  description,
+  coverFile,
+}: CreateEventInput): Promise<CreateEventResult> => {
   let coverImageUrl: string | null = null;
 
-  if (payload.coverFile) {
-    const filePath = `covers/${Date.now()}-${payload.coverFile.name}`;
-    const { error: uploadError } = await supabase.storage.from(EVENT_BUCKET).upload(filePath, payload.coverFile, {
-      cacheControl: '3600',
-      upsert: false,
-    });
+  if (coverFile) {
+    const fileExt = coverFile.name.split('.').pop() || 'jpg';
+    const filePath = `covers/${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
 
-    if (uploadError) throw uploadError;
+    const { error: uploadError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(filePath, coverFile, { upsert: false });
 
-    const { data } = supabase.storage.from(EVENT_BUCKET).getPublicUrl(filePath);
-    coverImageUrl = data.publicUrl;
+    if (uploadError) {
+      throw new Error(uploadError.message);
+    }
+
+    coverImageUrl = getPublicFileUrl(STORAGE_BUCKET, filePath);
   }
 
-  const eventCode = randomCode();
+  for (let i = 0; i < 5; i += 1) {
+    const eventCode = generateEventCode();
 
+    const { data, error } = await supabase
+      .from('events')
+      .insert([
+        {
+          title,
+          type,
+          date,
+          description: description || null,
+          cover_image_url: coverImageUrl,
+          event_code: eventCode,
+        },
+      ])
+      .select('*')
+      .single();
+
+    if (!error && data) {
+      const event = data as EventRecord;
+      const shareLink = `${window.location.origin}?event=${event.event_code}`;
+      const qrCode = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(
+        shareLink,
+      )}`;
+
+      return {
+        event,
+        shareLink,
+        qrCode,
+      };
+    }
+
+    if (error?.code === '23505') {
+      continue;
+    }
+
+    throw new Error(error?.message || 'Failed to create event');
+  }
+
+  throw new Error('Unable to generate a unique event code. Please try again.');
+};
+
+export const getEventByCode = async (eventCode: string): Promise<EventRecord> => {
   const { data, error } = await supabase
     .from('events')
-    .insert({
-      title: payload.title,
-      type: payload.type,
-      date: payload.date,
-      description: payload.description ?? null,
-      cover_image_url: coverImageUrl,
-      event_code: eventCode,
-      host_id: payload.hostId ?? null,
-    })
-    .select()
-    .single<EventRecord>();
-
-  if (error) throw error;
-
-  const shareLink = `${window.location.origin}/?event=${data.event_code}`;
-  const qrCode = await QRCode.toDataURL(shareLink);
-
-  return { event: data, shareLink, qrCode };
-};
-
-export const getEventByCode = async (eventCode: string) => {
-  const { data, error } = await supabase.from('events').select('*').eq('event_code', eventCode).single<EventRecord>();
-  if (error) throw error;
-  return data;
-};
-
-export const addGuest = async (eventId: string, name: string) => {
-  const { data, error } = await supabase
-    .from('guests')
-    .insert({ event_id: eventId, name })
-    .select()
-    .single<GuestRecord>();
-  if (error) throw error;
-  return data;
-};
-
-export const listMessages = async (eventId: string) => {
-  const { data, error } = await supabase
-    .from('messages')
     .select('*')
-    .eq('event_id', eventId)
-    .order('created_at', { ascending: false })
-    .returns<MessageRecord[]>();
-  if (error) throw error;
-  return data;
+    .eq('event_code', eventCode)
+    .single();
+
+  if (error || !data) {
+    throw new Error('Event not found');
+  }
+
+  return data as EventRecord;
 };
 
-export const postMessage = async (eventId: string, guestName: string, content: string) => {
-  const { data, error } = await supabase
-    .from('messages')
-    .insert({ event_id: eventId, guest_name: guestName, content })
-    .select()
-    .single<MessageRecord>();
-  if (error) throw error;
-  return data;
-};
-
-export const listMedia = async (eventId: string) => {
-  const { data, error } = await supabase
-    .from('media')
-    .select('*')
-    .eq('event_id', eventId)
-    .order('created_at', { ascending: false })
-    .returns<MediaRecord[]>();
-  if (error) throw error;
-  return data;
-};
-
-export const uploadMedia = async (eventId: string, guestName: string, file: File, type: 'image' | 'video') => {
-  const filePath = `uploads/${eventId}/${Date.now()}-${file.name}`;
-  const { error: uploadError } = await supabase.storage.from(EVENT_BUCKET).upload(filePath, file, {
-    cacheControl: '3600',
-    upsert: false,
-  });
-  if (uploadError) throw uploadError;
-
-  const { data: publicData } = supabase.storage.from(EVENT_BUCKET).getPublicUrl(filePath);
-
-  const { data, error } = await supabase
-    .from('media')
-    .insert({
+export const addGuest = async (eventId: string, name: string): Promise<void> => {
+  const { error } = await supabase.from('guests').insert([
+    {
       event_id: eventId,
-      guest_name: guestName,
-      file_url: publicData.publicUrl,
-      type,
-    })
-    .select()
-    .single<MediaRecord>();
+      name,
+    },
+  ]);
 
-  if (error) throw error;
-  return data;
+  if (error) {
+    throw new Error(error.message);
+  }
 };
 
-export const listDonations = async (eventId: string) => {
-  const { data, error } = await supabase
-    .from('donations')
-    .select('*')
-    .eq('event_id', eventId)
-    .order('created_at', { ascending: false })
-    .returns<DonationRecord[]>();
-  if (error) throw error;
-  return data;
+export const postMessage = async (
+  eventId: string,
+  guestName: string,
+  content: string,
+): Promise<void> => {
+  const { error } = await supabase.from('messages').insert([
+    {
+      event_id: eventId,
+      guest_name: guestName || 'Guest',
+      content,
+    },
+  ]);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+};
+
+export const uploadMedia = async (
+  eventId: string,
+  guestName: string,
+  file: File,
+  mediaType: 'image' | 'video',
+): Promise<void> => {
+  const fileExt = file.name.split('.').pop() || 'bin';
+  const filePath = `uploads/${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(filePath, file, { upsert: false });
+
+  if (uploadError) {
+    throw new Error(uploadError.message);
+  }
+
+  const fileUrl = getPublicFileUrl(STORAGE_BUCKET, filePath);
+
+  const { error } = await supabase.from('media').insert([
+    {
+      event_id: eventId,
+      guest_name: guestName || 'Guest',
+      file_url: fileUrl,
+      type: mediaType,
+    },
+  ]);
+
+  if (error) {
+    throw new Error(error.message);
+  }
 };
 
 export const addDonation = async (
@@ -153,79 +184,121 @@ export const addDonation = async (
   donorName: string,
   amount: number,
   visibility: 'public' | 'anonymous',
-  message?: string,
-) => {
-  const { data, error } = await supabase
-    .from('donations')
-    .insert({
+  message: string,
+): Promise<void> => {
+  const { error } = await supabase.from('donations').insert([
+    {
       event_id: eventId,
-      donor_name: donorName,
+      donor_name: donorName || 'Guest',
       amount,
       visibility,
-      message: message ?? null,
-    })
-    .select()
-    .single<DonationRecord>();
-  if (error) throw error;
-  return data;
+      message: message || null,
+    },
+  ]);
+
+  if (error) {
+    throw new Error(error.message);
+  }
 };
 
-export const listLivestreams = async (eventId: string) => {
+export const listLivestreams = async (eventId: string): Promise<LivestreamRecord[]> => {
   const { data, error } = await supabase
     .from('livestreams')
     .select('*')
     .eq('event_id', eventId)
-    .order('created_at', { ascending: false })
-    .returns<LivestreamRecord[]>();
-  if (error) throw error;
-  return data;
-};
+    .order('created_at', { ascending: false });
 
-export const getMetrics = async (eventId: string): Promise<EventMetrics> => {
-  const [{ count: guests }, { count: messages }, { count: media }, donationResult] = await Promise.all([
-    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', eventId),
-    supabase.from('messages').select('*', { count: 'exact', head: true }).eq('event_id', eventId),
-    supabase.from('media').select('*', { count: 'exact', head: true }).eq('event_id', eventId),
-    supabase.from('donations').select('amount').eq('event_id', eventId),
-  ]);
+  if (error) {
+    throw new Error(error.message);
+  }
 
-  if (donationResult.error) throw donationResult.error;
-
-  return {
-    guests: guests ?? 0,
-    messages: messages ?? 0,
-    media: media ?? 0,
-    donationsTotal: (donationResult.data ?? []).reduce((sum, row) => sum + (row.amount ?? 0), 0),
-  };
+  return (data || []) as LivestreamRecord[];
 };
 
 export const getFeed = async (eventId: string): Promise<FeedItem[]> => {
-  const [messages, media, donations] = await Promise.all([listMessages(eventId), listMedia(eventId), listDonations(eventId)]);
+  const [messagesResult, mediaResult, donationsResult] = await Promise.all([
+    supabase.from('messages').select('*').eq('event_id', eventId).order('created_at', { ascending: false }),
+    supabase.from('media').select('*').eq('event_id', eventId).order('created_at', { ascending: false }),
+    supabase.from('donations').select('*').eq('event_id', eventId).order('created_at', { ascending: false }),
+  ]);
 
-  return [
-    ...messages.map((item): FeedItem => ({
-      kind: 'message',
-      id: item.id,
-      createdAt: item.created_at,
-      actor: item.guest_name,
-      text: item.content,
-    })),
-    ...media.map((item): FeedItem => ({
-      kind: 'media',
-      id: item.id,
-      createdAt: item.created_at,
-      actor: item.guest_name,
-      mediaType: item.type,
-      url: item.file_url,
-    })),
-    ...donations.map((item): FeedItem => ({
-      kind: 'donation',
-      id: item.id,
-      createdAt: item.created_at,
-      actor: item.visibility === 'anonymous' ? 'Anonymous' : item.donor_name,
-      amount: item.amount,
-      message: item.message,
-      anonymous: item.visibility === 'anonymous',
-    })),
-  ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  if (messagesResult.error) {
+    throw new Error(messagesResult.error.message);
+  }
+
+  if (mediaResult.error) {
+    throw new Error(mediaResult.error.message);
+  }
+
+  if (donationsResult.error) {
+    throw new Error(donationsResult.error.message);
+  }
+
+  const messageItems: FeedItem[] = ((messagesResult.data || []) as MessageRecord[]).map((item) => ({
+    kind: 'message',
+    id: item.id,
+    createdAt: item.created_at,
+    actor: item.guest_name,
+    text: item.content,
+  }));
+
+  const mediaItems: FeedItem[] = ((mediaResult.data || []) as MediaRecord[]).map((item) => ({
+    kind: 'media',
+    id: item.id,
+    createdAt: item.created_at,
+    actor: item.guest_name,
+    mediaType: item.type,
+    url: item.file_url,
+  }));
+
+  const donationItems: FeedItem[] = ((donationsResult.data || []) as DonationRecord[]).map((item) => ({
+    kind: 'donation',
+    id: item.id,
+    createdAt: item.created_at,
+    actor: item.visibility === 'anonymous' ? 'Anonymous' : item.donor_name,
+    amount: Number(item.amount),
+    message: item.message,
+    anonymous: item.visibility === 'anonymous',
+  }));
+
+  return [...messageItems, ...mediaItems, ...donationItems].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
+};
+
+export const getMetrics = async (eventId: string): Promise<EventMetrics> => {
+  const [guestsResult, messagesResult, mediaResult, donationsResult] = await Promise.all([
+    supabase.from('guests').select('id', { count: 'exact', head: true }).eq('event_id', eventId),
+    supabase.from('messages').select('id', { count: 'exact', head: true }).eq('event_id', eventId),
+    supabase.from('media').select('id', { count: 'exact', head: true }).eq('event_id', eventId),
+    supabase.from('donations').select('amount').eq('event_id', eventId),
+  ]);
+
+  if (guestsResult.error) {
+    throw new Error(guestsResult.error.message);
+  }
+
+  if (messagesResult.error) {
+    throw new Error(messagesResult.error.message);
+  }
+
+  if (mediaResult.error) {
+    throw new Error(mediaResult.error.message);
+  }
+
+  if (donationsResult.error) {
+    throw new Error(donationsResult.error.message);
+  }
+
+  const donationsTotal = ((donationsResult.data || []) as Pick<DonationRecord, 'amount'>[]).reduce(
+    (sum, item) => sum + Number(item.amount),
+    0,
+  );
+
+  return {
+    guests: guestsResult.count || 0,
+    messages: messagesResult.count || 0,
+    media: mediaResult.count || 0,
+    donationsTotal,
+  };
 };

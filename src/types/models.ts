@@ -9,6 +9,7 @@ export interface EventRecord {
   cover_image_url: string | null;
   event_code: string;
   host_id: string | null;
+  created_at?: string;
 }
 
 export interface GuestRecord {
@@ -61,6 +62,27 @@ export interface EventMetrics {
 }
 
 export type FeedItem =
-  | { kind: 'message'; id: string; createdAt: string; actor: string; text: string }
-  | { kind: 'media'; id: string; createdAt: string; actor: string; mediaType: 'image' | 'video'; url: string }
-  | { kind: 'donation'; id: string; createdAt: string; actor: string; amount: number; message: string | null; anonymous: boolean };
+  | {
+      kind: 'message';
+      id: string;
+      createdAt: string;
+      actor: string;
+      text: string;
+    }
+  | {
+      kind: 'media';
+      id: string;
+      createdAt: string;
+      actor: string;
+      mediaType: 'image' | 'video';
+      url: string;
+    }
+  | {
+      kind: 'donation';
+      id: string;
+      createdAt: string;
+      actor: string;
+      amount: number;
+      message: string | null;
+      anonymous: boolean;
+    };
